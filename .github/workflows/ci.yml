@@ -1,0 +1,92 @@
+# R-03: tests, scanners and a signed image with an SBOM. Actions pinned by commit SHA, tools by image digest.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+env:
+  TRIVY: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+  GITLEAKS: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  SEMGREP: semgrep/semgrep:1.183.0@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # gitleaks scans the whole history
+      - name: gitleaks (secrets in history)
+        run: docker run --rm -v "$PWD:/repo" "$GITLEAKS" git /repo --redact --verbose
+      - name: semgrep (SAST)
+        run: docker run --rm -v "$PWD:/src" -w /src "$SEMGREP" semgrep scan --config p/default --error --metrics=off
+      - name: trivy fs (dependencies, Dockerfile)
+        run: docker run --rm -v "$PWD:/src" "$TRIVY" fs --exit-code 1 --severity HIGH,CRITICAL --scanners vuln,secret,misconfig /src
+
+  image:
+    needs: [test, scan]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # keyless cosign signature (Sigstore OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build
+        run: docker build -t zk-auth:ci .
+      - name: trivy image
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY" image --exit-code 1 --severity HIGH,CRITICAL zk-auth:ci
+
+      - name: push to GHCR
+        if: github.ref == 'refs/heads/main'
+        id: push
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker tag zk-auth:ci "$image:$GITHUB_SHA"
+          docker push "$image:$GITHUB_SHA"
+          echo "ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$image:$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+      - name: SBOM
+        if: github.ref == 'refs/heads/main'
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ steps.push.outputs.ref }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: github.ref == 'refs/heads/main'
+      - name: sign image and attest SBOM
+        if: github.ref == 'refs/heads/main'
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+        run: |
+          cosign sign --yes "$REF"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$REF"
+          echo "Signed $REF" >> "$GITHUB_STEP_SUMMARY"
