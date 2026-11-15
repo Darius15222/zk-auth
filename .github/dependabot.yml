@@ -6,6 +6,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown: # wait a week: a freshly published version can be malicious or broken
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
@@ -14,6 +16,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown: # wait a week: a freshly published version can be malicious or broken
+      default-days: 7
     groups:
       npm:
         patterns: ["*"]
@@ -22,6 +26,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown: # wait a week: a freshly published version can be malicious or broken
+      default-days: 7
     groups:
       base-images:
         patterns: ["*"]
