@@ -16,6 +16,13 @@ const BCRYPT_COST = 12;
 const DUMMY_HASH = bcrypt.hashSync('timing-equalizer', BCRYPT_COST); // unknown users cost the same as known ones
 const TRUST_PROXY = process.env.TRUST_PROXY === '1'; // set behind Traefik so source.ip is the real client
 
+// R-07 lockout: MAX_FAILURES failed logins for one (source IP, user) pair inside LOCK_MS block that pair until the window ends.
+// Keyed on the pair so an attacker cannot lock the real user out from another address.
+// ponytail: in-memory and per pair, so guessing one user from many addresses is not throttled; a per-user limit in a shared store is the upgrade path
+const MAX_FAILURES = 10;
+const LOCK_MS = 5 * 60_000;
+const failures = new Map<string, { n: number; exp: number }>(); // "ip|user" -> failures in the current window
+
 type Body = Record<string, unknown>;
 
 function sourceIp(req: IncomingMessage): string {
@@ -64,6 +71,35 @@ function consumeNonce(nonce: string, user: string): string {
   return '';
 }
 
+function locked(key: string): boolean {
+  const f = failures.get(key);
+  if (f && Date.now() > f.exp) failures.delete(key);
+  return (failures.get(key)?.n ?? 0) >= MAX_FAILURES;
+}
+
+function recordLogin(key: string, ok: boolean) {
+  if (ok) return void failures.delete(key);
+  const now = Date.now();
+  // usernames are attacker-chosen: drop expired windows before the map can grow without bound
+  if (failures.size > 10_000) for (const [k, v] of failures) if (now > v.exp) failures.delete(k);
+  const f = failures.get(key) ?? { n: 0, exp: now + LOCK_MS };
+  f.n++;
+  failures.set(key, f);
+}
+
+// one login attempt behind the lockout: `check` returns why the login fails, or '' when it succeeds
+async function login(req: IncomingMessage, res: ServerResponse, action: string, user: string, check: () => string | Promise<string>) {
+  const key = `${sourceIp(req)}|${user}`;
+  if (locked(key)) {
+    audit(req, action, 'failure', user, 'rate_limited'); // still one failure line, so brute force detections keep counting
+    return send(res, 429, { ok: false });
+  }
+  const reason = await check();
+  recordLogin(key, !reason);
+  audit(req, action, reason ? 'failure' : 'success', user, reason || undefined);
+  send(res, reason ? 401 : 200, { ok: !reason });
+}
+
 const routes: Record<string, (req: IncomingMessage, res: ServerResponse, b: Body, user: string) => Promise<void> | void> = {
   '/register/zk'(req, res, b, user) {
     const pk = str(b, 'publicKey');
@@ -93,18 +129,16 @@ const routes: Record<string, (req: IncomingMessage, res: ServerResponse, b: Body
   },
 
   '/login/zk'(req, res, b, user) {
-    const reason = consumeNonce(str(b, 'nonce'), user)
+    return login(req, res, 'login-zk', user, () => consumeNonce(str(b, 'nonce'), user)
       || (!zkUsers.has(user) ? 'unknown_user' : '')
-      || (verify(zkUsers.get(user)!, user, str(b, 'nonce'), { R: str(b, 'R'), s: str(b, 's') }) ? '' : 'invalid_proof');
-    audit(req, 'login-zk', reason ? 'failure' : 'success', user, reason || undefined);
-    send(res, reason ? 401 : 200, { ok: !reason });
+      || (verify(zkUsers.get(user)!, user, str(b, 'nonce'), { R: str(b, 'R'), s: str(b, 's') }) ? '' : 'invalid_proof'));
   },
 
-  async '/login/password'(req, res, b, user) {
-    const ok = await bcrypt.compare(str(b, 'password'), pwUsers.get(user) ?? DUMMY_HASH) && pwUsers.has(user);
-    const reason = ok ? undefined : pwUsers.has(user) ? 'invalid_password' : 'unknown_user';
-    audit(req, 'login-password', ok ? 'success' : 'failure', user, reason);
-    send(res, ok ? 200 : 401, { ok });
+  '/login/password'(req, res, b, user) {
+    return login(req, res, 'login-password', user, async () => {
+      const ok = await bcrypt.compare(str(b, 'password'), pwUsers.get(user) ?? DUMMY_HASH) && pwUsers.has(user);
+      return ok ? '' : pwUsers.has(user) ? 'invalid_password' : 'unknown_user';
+    });
   },
 };
 
