@@ -1,0 +1,27 @@
+# R-03: pins age; Dependabot proposes the bump, CI decides. Weekly and grouped to keep the PR count low.
+# Not covered (bump by hand): scanner image digests in the workflow `env:` block.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
