@@ -24,6 +24,7 @@ Node.js 26 running TypeScript directly (type stripping, no build step), `node:ht
 
 - Every auth decision logs exactly one ECS line: `event.category: authentication`, `event.action`, `event.outcome`, `event.reason` on failure, `user.name`, `source.ip`. Detections in `zk-detections` depend on these field names; change them only together.
 - Failure responses stay generic (`401 {ok:false}`); the reason goes to the log only.
+- Lockout (R-07): 10 failed logins for one (`source.ip`, `user.name`) pair within 5 minutes answer `429 {ok:false}` until the window ends, logged as a failure with `event.reason: rate_limited`.
 - New crypto goes through `@noble/*`; never hand-roll group arithmetic.
 
 ## API
@@ -33,6 +34,6 @@ Node.js 26 running TypeScript directly (type stripping, no build step), `node:ht
 | `POST /register/zk` | `username`, `publicKey` (hex) | 201 |
 | `POST /register/password` | `username`, `password` (8-72 bytes) | 201 |
 | `POST /challenge` | `username` | `nonce`, single use, 60 s |
-| `POST /login/zk` | `username`, `nonce`, `R`, `s` | 200 or 401 |
-| `POST /login/password` | `username`, `password` | 200 or 401 |
+| `POST /login/zk` | `username`, `nonce`, `R`, `s` | 200, 401 or 429 |
+| `POST /login/password` | `username`, `password` | 200, 401 or 429 |
 | `GET /healthz` | | 200 |
