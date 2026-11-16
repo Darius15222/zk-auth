@@ -48,6 +48,15 @@ test('password login: success, wrong password and unknown user fail', async () =
   assert.equal((await post('/login/password', { username: 'nobody', password: 'whatever1' })).status, 401);
 });
 
+test('lockout: the 11th failure is 429, even with the right password; other users are not affected', async () => {
+  assert.equal((await post('/register/password', { username: 'dave', password: 'correct horse' })).status, 201);
+  assert.equal((await post('/register/password', { username: 'erin', password: 'correct horse' })).status, 201);
+  for (let i = 0; i < 10; i++) assert.equal((await post('/login/password', { username: 'dave', password: 'wrong' })).status, 401);
+  assert.equal((await post('/login/password', { username: 'dave', password: 'wrong' })).status, 429);
+  assert.equal((await post('/login/password', { username: 'dave', password: 'correct horse' })).status, 429);
+  assert.equal((await post('/login/password', { username: 'erin', password: 'correct horse' })).status, 200);
+});
+
 test('input validation', async () => {
   assert.equal((await post('/register/zk', { username: 'Bad Name!', publicKey: 'x' })).status, 400);
   assert.equal((await post('/register/zk', { username: 'carol', publicKey: 'not-a-point' })).status, 400);
