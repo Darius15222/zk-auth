@@ -14,8 +14,9 @@ concurrency:
 
 jobs:
   review:
-    # forks and Dependabot get no secrets; skip instead of failing
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+    # forks and Dependabot get no secrets; skip instead of failing. The PR author, not github.actor: after someone
+    # updates a Dependabot branch the actor is that person, and the review would run on a dependency bump.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
