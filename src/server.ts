@@ -129,8 +129,7 @@ const routes: Record<string, (req: IncomingMessage, res: ServerResponse, b: Body
   },
 
   '/login/zk'(req, res, b, user) {
-    return login(req, res, 'login-zk', user, () => consumeNonce(str(b, 'nonce'), user)
-      || (!zkUsers.has(user) ? 'unknown_user' : '')
+    return login(req, res, 'login-zk', user, () => (!zkUsers.has(user) ? 'unknown_user' : '')
       || (verify(zkUsers.get(user)!, user, str(b, 'nonce'), { R: str(b, 'R'), s: str(b, 's') }) ? '' : 'invalid_proof'));
   },
 
