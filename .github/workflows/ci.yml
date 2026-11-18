@@ -90,3 +90,26 @@ jobs:
           cosign sign --yes "$REF"
           cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$REF"
           echo "Signed $REF" >> "$GITHUB_STEP_SUMMARY"
+
+      # R-03: propose the new digest to zk-platform as a PR; its CI (e2e) decides, a human merges.
+      # Needs ZK_PLATFORM_TOKEN: fine-grained PAT, zk-platform only, Contents and Pull requests read/write.
+      # The GITHUB_TOKEN cannot do it: it has no access to another repository, and PRs it opens do not trigger CI.
+      - name: bump the image in zk-platform
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.ZK_PLATFORM_TOKEN }}
+          REF: ${{ steps.push.outputs.ref }}
+        run: |
+          [[ -n $GH_TOKEN ]] || { echo "::notice::ZK_PLATFORM_TOKEN not set, bump zk-platform by hand"; exit 0; }
+          [[ $REF =~ ^ghcr\.io/[a-z0-9/_-]+@sha256:[0-9a-f]{64}$ ]] || { echo "unexpected image ref"; exit 1; }
+          repo="$GITHUB_REPOSITORY_OWNER/zk-platform" branch="bump/zk-auth-${GITHUB_SHA::7}"
+          gh repo clone "$repo" platform -- --depth 1 -q && cd platform
+          sed -i -E "s#ghcr\.io/[a-z0-9/_-]+/zk-auth@sha256:[0-9a-f]{64}#$REF#" envs/local/variables.tf
+          git diff --quiet && { echo "already at $REF"; exit 0; }
+          gh auth setup-git
+          git switch -q -c "$branch"
+          git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit -qam "chore: bump zk-auth image to ${GITHUB_SHA::7} (R-03)"
+          git push -q origin "$branch"
+          gh pr create -R "$repo" --head "$branch" --title "chore: bump zk-auth image to ${GITHUB_SHA::7} (R-03)" \
+            --body "Opened by zk-auth CI after it pushed and signed $REF (commit $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)."
