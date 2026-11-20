@@ -1,8 +1,14 @@
-import { test, before, after } from 'node:test';
+import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { server } from '../src/server.ts';
 import { keygen, prove, verify } from '../src/schnorr.ts';
+
+// the ECS lines the SIEM reads: detections in zk-detections match on event.action, event.outcome and event.reason
+const logs: { event?: { action: string; outcome: string; reason?: string }; user?: { name: string } }[] = [];
+const log = console.log;
+console.log = (line: string) => { try { logs.push(JSON.parse(line)); } catch { log(line); } };
+const lastEvent = () => logs.at(-1)?.event;
 
 let base = '';
 const post = async (path: string, body: object) => {
@@ -61,4 +67,64 @@ test('input validation', async () => {
   assert.equal((await post('/register/zk', { username: 'Bad Name!', publicKey: 'x' })).status, 400);
   assert.equal((await post('/register/zk', { username: 'carol', publicKey: 'not-a-point' })).status, 400);
   assert.equal((await fetch(base + '/nope')).status, 404);
+});
+
+test('one username namespace: a name taken by one method cannot be claimed with the other', async () => {
+  assert.equal((await post('/register/zk', { username: 'frank', publicKey: keygen().publicKey })).status, 201);
+  assert.equal((await post('/register/password', { username: 'frank', password: 'attacker-pw' })).status, 409);
+  assert.equal((await post('/register/password', { username: 'gina', password: 'correct horse' })).status, 201);
+  assert.equal((await post('/register/zk', { username: 'gina', publicKey: keygen().publicKey })).status, 409);
+});
+
+test('a public key sent in uppercase hex is stored canonically, so the honest proof verifies', async () => {
+  const { secret, publicKey } = keygen();
+  assert.equal((await post('/register/zk', { username: 'hank', publicKey: publicKey.toUpperCase() })).status, 201);
+  const nonce = await nonceFor('hank');
+  assert.equal((await post('/login/zk', { username: 'hank', nonce, ...prove(secret, 'hank', nonce) })).status, 200);
+});
+
+test('lockout holds under concurrency: 15 parallel wrong passwords give exactly 10 x 401', async () => {
+  assert.equal((await post('/register/password', { username: 'ivan', password: 'correct horse' })).status, 201);
+  const codes = await Promise.all(Array.from({ length: 15 }, () => post('/login/password', { username: 'ivan', password: 'wrong' })));
+  assert.deepEqual(codes.map((c) => c.status).sort(), [...Array(10).fill(401), ...Array(5).fill(429)]);
+});
+
+test('every login decision logs the reason the detections match on', async () => {
+  const { secret, publicKey } = keygen();
+  await post('/register/zk', { username: 'judy', publicKey });
+  const n1 = await nonceFor('judy');
+  const proof = prove(secret, 'judy', n1);
+  await post('/login/zk', { username: 'judy', nonce: n1, ...proof });
+  assert.deepEqual(lastEvent(), { kind: 'event', category: ['authentication'], type: ['start'], action: 'login-zk', outcome: 'success' });
+  await post('/login/zk', { username: 'judy', nonce: n1, ...proof });
+  assert.equal(lastEvent()?.reason, 'nonce_reuse');
+  const n2 = await nonceFor('judy');
+  await post('/login/zk', { username: 'judy', nonce: n2, ...prove(keygen().secret, 'judy', n2) });
+  assert.equal(lastEvent()?.reason, 'invalid_proof');
+  await post('/login/zk', { username: 'judy', nonce: 'f'.repeat(64), ...proof });
+  assert.equal(lastEvent()?.reason, 'unknown_nonce');
+  await post('/login/password', { username: 'nobody', password: 'whatever1' });
+  assert.equal(lastEvent()?.reason, 'unknown_user');
+  await post('/login/password', { username: 'bob', password: 'wrong-one' });
+  assert.equal(lastEvent()?.reason, 'invalid_password');
+  await post('/login/password', { username: 'dave', password: 'wrong' }); // dave is locked by the lockout test
+  assert.equal(lastEvent()?.reason, 'rate_limited');
+  assert.equal((await post('/login/zk', { username: 'Bad Name!' })).status, 400);
+  assert.deepEqual([lastEvent()?.action, lastEvent()?.reason, logs.at(-1)?.user?.name], ['login-zk', 'bad_request', '-']);
+});
+
+test('a proof replayed minutes later is still logged as nonce_reuse', async () => {
+  const { secret, publicKey } = keygen();
+  await post('/register/zk', { username: 'kate', publicKey });
+  const nonce = await nonceFor('kate');
+  const proof = prove(secret, 'kate', nonce);
+  assert.equal((await post('/login/zk', { username: 'kate', nonce, ...proof })).status, 200);
+  mock.timers.enable({ apis: ['Date'], now: Date.now() + 10 * 60_000 });
+  try {
+    await nonceFor('kate'); // a challenge in between used to sweep the burned nonce
+    assert.equal((await post('/login/zk', { username: 'kate', nonce, ...proof })).status, 401);
+    assert.equal(lastEvent()?.reason, 'nonce_reuse');
+  } finally {
+    mock.timers.reset();
+  }
 });
