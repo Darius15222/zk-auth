@@ -1,0 +1,38 @@
+# R-03: ZK_PLATFORM_TOKEN (fine-grained PAT, 90 days) drives the zk-platform image bump. When it expires the bump step
+# only prints a notice, so this weekly job goes red 14 days before expiry and GitHub emails the failure.
+# GitHub disables scheduled workflows after 60 days without repository activity; Renovate and Dependabot PRs keep it active.
+name: token-expiry
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays
+  workflow_dispatch:
+    inputs:
+      min_days:
+        description: fail below this many days (a high value proves the alert)
+        default: "14"
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    env:
+      GH_TOKEN: ${{ secrets.ZK_PLATFORM_TOKEN }}
+      MIN_DAYS: ${{ inputs.min_days || '14' }}
+    steps:
+      - name: days left
+        run: |
+          [[ $MIN_DAYS =~ ^[0-9]+$ ]] || { echo "::error::min_days must be a number"; exit 1; }
+          [[ -n $GH_TOKEN ]] || { echo "::error::ZK_PLATFORM_TOKEN is not set"; exit 1; }
+          # GitHub returns the expiry of a fine-grained PAT in this response header
+          h=$(curl -sS -o /dev/null -D - -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY_OWNER/zk-platform")
+          code=${h##*$'\n'}
+          [[ $code == 200 ]] || { echo "::error::token rejected (HTTP $code): expired or revoked, renew it"; exit 1; }
+          exp=$(sed -n 's/^github-authentication-token-expiration: *//Ip' <<<"$h" | tr -d '\r')
+          [[ -n $exp ]] || { echo "::error::no expiry header: not a fine-grained PAT?"; exit 1; }
+          days=$(( ($(date -d "$exp" +%s) - $(date +%s)) / 86400 ))
+          echo "ZK_PLATFORM_TOKEN expires $exp ($days days left)"
+          (( days >= MIN_DAYS )) || { echo "::error::ZK_PLATFORM_TOKEN expires in $days days, renew it"; exit 1; }
