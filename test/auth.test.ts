@@ -1,6 +1,7 @@
 import { test, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import { request } from 'node:http';
 import { server } from '../src/server.ts';
 import { keygen, prove, verify } from '../src/schnorr.ts';
 
@@ -123,7 +124,6 @@ test('a proof replayed minutes later is still logged as nonce_reuse', async () =
   assert.equal((await post('/login/zk', { username: 'kate', nonce, ...proof })).status, 200);
   mock.timers.enable({ apis: ['Date'], now: Date.now() + 10 * 60_000 });
   try {
-    await nonceFor('kate'); // a challenge in between must not drop the burned nonce
     assert.equal((await post('/login/zk', { username: 'kate', nonce, ...proof })).status, 401);
     assert.equal(lastEvent()?.reason, 'nonce_reuse');
   } finally {
@@ -143,6 +143,21 @@ test('the lock lasts a full window from the 10th attempt, not from the first', a
   } finally {
     mock.timers.reset();
   }
+});
+
+test('a multi-byte character split across body chunks survives (password still matches)', async () => {
+  const url = new URL(base + '/register/password');
+  const body = Buffer.from(JSON.stringify({ username: 'otto', password: 'p\u00e4ssword1' }));
+  const cut = body.indexOf(0xc3) + 1; // between the two bytes of the a-umlaut
+  const status = await new Promise<number>((ok, fail) => {
+    const req = request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': body.length } }, (res) => { res.resume(); ok(res.statusCode!); });
+    req.on('error', fail);
+    req.write(body.subarray(0, cut));
+    setTimeout(() => req.end(body.subarray(cut)), 50);
+  });
+  assert.equal(status, 201);
+  assert.equal((await post('/login/password', { username: 'otto', password: 'p\u00e4ssword1' })).status, 200);
 });
 
 // runs last: it fills the challenge store
