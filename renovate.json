@@ -1,41 +1,20 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "R-03: only the pins Dependabot cannot see (image digests in workflow and Terraform strings, Helm charts). Dependabot keeps actions, npm, pip, Dockerfile and Terraform providers.",
+  "description": "R-03: image digests in workflow strings, which Dependabot cannot see. Dependabot keeps actions, npm and the Dockerfile.",
   "enabledManagers": [
-    "custom.regex",
-    "terraform"
+    "custom.regex"
   ],
   "customManagers": [
     {
       "customType": "regex",
-      "description": "image:tag@sha256:digest in workflows, Terraform and test files (the zk-auth image has no tag and is bumped by zk-auth CI)",
+      "description": "image:tag@sha256:digest in workflows",
       "managerFilePatterns": [
-        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
-        "/\\.tf$/",
-        "/(^|/)tests/[^/]+\\.py$/"
+        "/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"
       ],
       "matchStrings": [
         "(?<depName>[a-z0-9][a-z0-9._/-]*[a-z0-9]):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})"
       ],
       "datasourceTemplate": "docker"
-    }
-  ],
-  "packageRules": [
-    {
-      "matchManagers": [
-        "terraform"
-      ],
-      "enabled": false
-    },
-    {
-      "matchManagers": [
-        "terraform"
-      ],
-      "matchDepTypes": [
-        "helm_release"
-      ],
-      "enabled": true,
-      "minimumReleaseAge": "7 days"
     }
   ],
   "minimumReleaseAge": "7 days",

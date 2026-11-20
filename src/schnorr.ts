@@ -42,10 +42,13 @@ export function verify(P: string, user: string, nonce: string, proof: Proof): bo
   }
 }
 
-export const isPublicKey = (hex: string): boolean => {
+// the canonical (lowercase) encoding of a valid non-identity point, or '' when hex is not one.
+// The challenge hashes P as a string, so storing the client's spelling (e.g. uppercase hex) would make prove() and verify() disagree.
+export const canonicalPublicKey = (hex: string): string => {
   try {
-    return !Point.fromHex(hex).is0();
+    const P = Point.fromHex(hex);
+    return P.is0() ? '' : P.toHex();
   } catch {
-    return false;
+    return '';
   }
 };
