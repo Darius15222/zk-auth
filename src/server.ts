@@ -34,6 +34,7 @@ const LOCK_MS = 5 * 60_000;
 const MAX_LOCK_KEYS = 10_000; // past this, expired windows are swept, at most once a second
 const attempts = new Map<string, { n: number; exp: number }>(); // "ip|user" -> attempts in the current window
 let nextSweep = 0;
+let nextNonceSweep = 0;
 // a burned nonce is kept this long past its expiry (once the store is full), so a late replay still logs nonce_reuse
 const REPLAY_KEEP_MS = 5 * 60_000;
 
@@ -64,6 +65,7 @@ function send(res: ServerResponse, status: number, body: object) {
 
 async function readJson(req: IncomingMessage): Promise<Body> {
   let raw = '';
+  req.setEncoding('utf8'); // decode across chunks: a multi-byte character split between two chunks must not become U+FFFD
   for await (const chunk of req) {
     raw += chunk;
     if (raw.length > 16_384) throw new Error('body too large');
@@ -155,7 +157,11 @@ const routes: Record<string, (req: IncomingMessage, res: ServerResponse, b: Body
   '/challenge'(req, res, _b, user) {
     const now = Date.now();
     // sweep only when full: expired unused nonces, and burned ones past REPLAY_KEEP_MS
-    if (nonces.size >= MAX_NONCES) for (const [k, v] of nonces) if (now > v.exp + (v.used ? REPLAY_KEEP_MS : 0)) nonces.delete(k);
+    // at most once a second, so a flood of live nonces does not make every request walk the whole store
+    if (nonces.size >= MAX_NONCES && now >= nextNonceSweep) {
+      nextNonceSweep = now + 1000;
+      for (const [k, v] of nonces) if (now > v.exp + (v.used ? REPLAY_KEEP_MS : 0)) nonces.delete(k);
+    }
     if (nonces.size >= MAX_NONCES) {
       audit(req, 'challenge', 'failure', user, 'busy'); // a flood of challenges must show up in the SIEM
       return send(res, 503, { error: 'busy' });
